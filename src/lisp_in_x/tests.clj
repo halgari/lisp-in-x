@@ -77,7 +77,10 @@
 (reset-globals)
 
 (println "READ FILE")
+(println "MORE EVAL TESTS")
 (read-file "src/lisp_in_x/stdlib.clj")
+(println "LOADED STDLIB")
+(println "DATA " (quote (* 1 2)))
 
 (println "EVAL 4 * 4 = " (eval nil '(* 4 4)))
 

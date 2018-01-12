@@ -27,7 +27,6 @@
           :else
           (.write w (format "%s . %s)" (pr-str (.-car c)) (pr-str (.-cdr c))))))))
 
-
 (defn cons
   ([v]
    (->Cons v nil))
@@ -61,15 +60,12 @@
         (recur (cdr env) sym)))
     (get-global sym)))
 
-
 (defn new-env [& args]
   (reduce
     (fn [env [car cdr]]
       (bind env car cdr))
     nil
     (partition 2 args)))
-
-
 
 (def globals (atom nil))
 
@@ -104,7 +100,7 @@
 
 (defn eval-apply [env f args]
   (if (nil? f)
-    (throw (ex-info "Canot apply values to nil"
+    (throw (ex-info "Cannot apply values to nil"
                     {:args args})))
   (let [lst (eval-list env args)]
     (apply f lst)))
@@ -144,8 +140,8 @@
                    val)
     (= sym 'quote) (car form)
     (= sym 'fn) (let [args (car form)
-                          body (cons 'do (cdr form))]
-                      (make-lambda env args body))
+                      body (cons 'do (cdr form))]
+                  (make-lambda env args body))
     (= sym 'resolve) (get-global (eval env (car form)))
     (= sym 'cond) (loop [form form]
                     (let [pred-expr (car form)
@@ -212,10 +208,18 @@
 
 (comment
 
+  @globals
+
+
+  (clj->lisp '(fn [x] (+ x y)))
+
+  (reset-globals)
   (do (reset-globals)
       (eval nil (clj->lisp '(do (def square (lambda [x]
                                                     (* x x)))
                                 (square 2)))))
+
+  (eval (new-env 'x 42) (clj->lisp '(+ 1 2)))
 
   (eval (new-env 'f false 'r 2)
         (clj->lisp '(if f r 42)))
@@ -239,10 +243,22 @@
           n
           (+ (fib (dec n))
              (fib (- n 2))))))
-    (fib 12))
+    (fib 15)
+    )
 
   (eval-file "src/lisp_in_x/tests.clj")
 
   (eval-file "src/lisp_in_x/deeper.clj")
+
+  (eval-forms
+    (load-file "src/lisp_in_x/lisp_in_lisp.clj")
+    (reset-globals)
+    (eval nil '(do (def fib
+                     (fn [n]
+                       (if (<= n 1)
+                         n
+                         (+ (fib (dec n))
+                            (fib (- n 2))))))
+                   (fib 15))))
 
   )
