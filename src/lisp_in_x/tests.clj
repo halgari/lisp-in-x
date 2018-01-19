@@ -29,6 +29,7 @@
 
 (println "Assoc List interaction")
 (def env (append-assoc (append-assoc nil 'x 42) 'y 3))
+(println "Created")
 (println "Find x" (lookup-assoc env 'x))
 (println "Find y" (lookup-assoc env 'y))
 (println "Find z" (lookup-assoc env 'z))

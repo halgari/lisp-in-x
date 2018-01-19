@@ -1,0 +1,2 @@
+export PKG_CONFIG_PATH=/usr/local/Cellar/libffi/3.2.1/lib/pkgconfig/
+../pypy/rpython/bin/rpython --opt=jit src/lisp_in_x/in_rpython_jit.py

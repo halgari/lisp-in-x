@@ -1,13 +1,18 @@
 import sys
 sys.path.append("../pypy")
 import rpython.rlib.streamio as streamio
+import rpython.rlib.jit as jit
+
+# To compile with a JIT:
+# ../pypy/rpython/bin/rpython --opt=jit src/lisp_in_x/in_rpython_jit.py
+# This assumes that the pypy directory is at the same level as the lisp-in-x files
 
 
 class Object(object):
     _immutable_ = True
 
     def type(self):
-        raise "No Type defined"
+        return object_type
 
     def to_string(self):
         return "<Object>"
@@ -18,16 +23,26 @@ class Object(object):
     def __repr__(self):
         return self.to_string()
 
+    def invoke(self, args, stack):
+        print("Can't invoke %s with args %s, object of type %s is uncallable" % (self.to_string(), args.to_string(),
+                                                                                 self.type().to_string()))
+        raise AssertionError()
+
+
+
 
 class Type(Object):
     _immutable_ = True
-
     def __init__(self, type_name):
         self._type_name = type_name
+
+    def type(self):
+        return Type("Type")
 
     def to_string(self):
         return "<Type " + self._type_name + ">"
 
+object_type = Type("Objecct")
 
 class Integer(Object):
     _immutable_ = True
@@ -59,7 +74,6 @@ class String(Object):
     def type(self):
         return self._type
 
-
 class SymbolRegistry(object):
     def __init__(self):
         self._registry = {}
@@ -74,7 +88,6 @@ class SymbolRegistry(object):
         return sym
 
 symbol_registry = SymbolRegistry()
-
 
 class Symbol(Object):
     _immutable_ = True
@@ -197,8 +210,10 @@ def defn(name):
         return f
     return inner
 
+
 @defn("println")
 class Println(Fn):
+    @jit.unroll_safe
     def invoke(self, args, stack):
         strs = []
         while args is not nil:
@@ -218,7 +233,7 @@ class LoadFile(Fn):
     def invoke(self, args, stack):
         rdr = PushbackReader(FileReader(args.car()._str_val))
         forms = read_all(rdr)
-        return nil, stack.push(EvalExpr(nil, forms))
+        return nil, stack.push(EvalExpr(Env(), forms))
 
 
 @defn("<")
@@ -438,10 +453,11 @@ fn_sym = Symbol.intern("fn")
 cond_sym = Symbol.intern("cond")
 resolve_sym = Symbol.intern("resolve")
 let_sym = Symbol.intern("let")
-
+self_sym = Symbol.intern("__self__")
 
 def quote_reader(rdr):
     return Cons.from_list([quote_sym, read(rdr)])
+
 
 def str_to_ints(str):
     return list(map(ord, str))
@@ -515,6 +531,7 @@ def read_all(rdr):
 
 class Stack(object):
     _immutable_ = True
+
     def __init__(self, k=None, prev=None):
         self._k = k
         self._prev = prev
@@ -535,15 +552,43 @@ class Continuation(object):
     def call_continuation(self, val, stack):
         return val, stack
 
+    def can_enter_jit(self):
+        return False
+
+    def expr(self):
+        return nil
+
 class EvalExpr(Continuation):
     _immutable_ = True
 
     def __init__(self, env, expr):
         self._env = env
-        self._expr = expr
+        self._expr = jit.promote(expr)
 
     def call_continuation(self, val, stack):
-        return eval_one(self._env, self._expr, stack)
+        return eval_one(self._env, jit.promote(self._expr), stack)
+
+    def expr(self):
+        return self._expr
+
+class ApplyContinuation(Continuation):
+    _immutable_ = True
+    def __init__(self, env, f, args):
+        self._env = env
+        self._f = f
+        self._args = args
+
+    def call_continuation(self, val, stack):
+        return self._f.invoke(self._args, stack)
+
+    def expr(self):
+        return self._f
+
+    def can_enter_jit(self):
+        self_f = self._env.lookup(self_sym)
+        if isinstance(self_f, Lambda) and isinstance(self._f, Lambda):
+            return self_f._body is self._f._body
+        return False
 
 class EvalApply(Continuation):
     _immutable_ = True
@@ -553,8 +598,8 @@ class EvalApply(Continuation):
         self._exprs = exprs
         self._expr_count = expr_count
 
+    @jit.unroll_safe
     def call_continuation(self, val, stack):
-        old_stack = stack
         if self._exprs is nil:
             if self._expr_count == 1:
                 f = val
@@ -567,13 +612,16 @@ class EvalApply(Continuation):
                     args = Cons(k.val(), args)
                 k, stack = stack.pop()
                 f = k.val()
-            return f.invoke(args, stack)
+            return nil, stack.push(ApplyContinuation(self._env, f, args))
 
         else:
             stack = stack.push(Val(val)) \
                          .push(EvalApply(self._env, self._exprs.cdr(), self._expr_count + 1)) \
                          .push(EvalExpr(self._env, self._exprs.car()))
             return nil, stack
+
+    def expr(self):
+        return self._exprs
 
 class Val(Continuation):
     _immutable_ = True
@@ -597,6 +645,9 @@ class DoContinuation(Continuation):
         else:
             return nil, stack.push(DoContinuation(self._env, self._args.cdr())) \
                              .push(EvalExpr(self._env, self._args.car()))
+
+    def expr(self):
+        return self._args
 
 class DefContinuation(Continuation):
     _immutable_ = True
@@ -640,6 +691,9 @@ class CondContinuation(Continuation):
             return nil, stack.push(CondContinuation(self._env, self._exprs.cdr().cdr())) \
                              .push(EvalExpr(self._env, self._exprs.cdr().car()))
 
+    def expr(self):
+        return self._exprs
+
 
 class LetContinuation(Continuation):
     _immutable_ = True
@@ -651,12 +705,15 @@ class LetContinuation(Continuation):
         self._body = body
 
     def call_continuation(self, val, stack):
-        new_env = Cons(Cons(self._sym, val), self._env)
+        new_env = self._env.bind(self._sym, val)
         if self._bind is nil:
             return nil, stack.push(DoContinuation(new_env, self._body))
         else:
             return nil, stack.push(LetContinuation(new_env, self._bind.car(), self._bind.cdr().cdr(), self._body)) \
                              .push(EvalExpr(new_env, self._bind.cdr().car()))
+
+    def expr(self):
+        return self._bind
 
 
 
@@ -673,18 +730,19 @@ class ResolveContinuation(Continuation):
 class Lambda(Fn):
     _immutable_ = True
     def __init__(self, env, arg_list, body):
-        self._env = env
+        self._env = env.bind(self_sym, self)
         self._arg_list = arg_list
         self._body = body
 
     def to_string(self):
         return "Lambda"
 
+    @jit.unroll_safe
     def invoke(self, args, stack):
-        new_env = self._env
+        new_env = jit.promote(self._env)
         arg_list = self._arg_list
         while args is not nil:
-            new_env = Cons(Cons(arg_list.car(), args.car()), new_env)
+            new_env = new_env.bind(arg_list.car(), args.car())
             arg_list = arg_list.cdr()
             args = args.cdr()
 
@@ -721,6 +779,7 @@ def eval_sexpr(env, sym, args, stack):
                      .push(EvalExpr(env, sym))
 
 def eval_one(env, expr, stack):
+    expr = jit.promote(expr)
     if isinstance(expr, Cons):
         if isinstance(expr.car(), Symbol):
             return eval_sexpr(env, expr.car(), expr.cdr(), stack)
@@ -728,23 +787,84 @@ def eval_one(env, expr, stack):
             return nil, stack.push(EvalApply(env, expr.cdr())) \
                              .push(EvalExpr(env, expr.car()))
     elif isinstance(expr, Symbol):
-        return lookup(env, expr), stack
+        return env.lookup(expr), stack
     else:
         return expr, stack
 
 class Globals(object):
-    _immutable_fields_ = ["_globals"]
+    _immutable_fields_ = ["_globals", "_rev?", "_mutable_globals"]
     def __init__(self):
         self._globals = {}
+        self._mutable_globals = {}
+        self._rev = 0
+
+    def mark_mutable(self, k):
+        self._mutable_globals[k] = k
+        self._rev += 1
+
+    @jit.elidable_promote()
+    def _is_mutable(self, k, rev):
+        return k in self._mutable_globals
+
+    def is_mutable(self, k):
+        return self._is_mutable(k, self._rev)
+
+    @jit.elidable_promote()
+    def _is_defined(self, k, rev):
+        return k in self._globals
+
+    def is_defined(self, k):
+        return self._is_mutable(k, self._rev)
 
     def def_global(self, k, v):
+        if self.is_defined(k):
+            if not self.is_mutable(k):
+                self.mark_mutable(k)
+        else:
+            self._rev += 1
+
         self._globals[k] = v
 
-    def get_global(self, k):
+    @jit.elidable_promote()
+    def _get_global_constant(self, k, rev):
         return self._globals[k]
+
+    def get_global(self, k):
+        try:
+            if self.is_mutable(k):
+                return self._globals[k]
+            else:
+                return self._get_global_constant(k, self._rev)
+        except KeyError:
+            print("Global not defined: " + k._str_val )
+            raise
 
     def clear(self):
         self._globals.clear()
+
+class Env(object):
+    _immutable_ = True
+    #_virtualizable_ = ["_k", "_v", "_prev"]
+
+    def __init__(self, k=self_sym, v=nil, prev=None):
+        self._k = k
+        self._v = v
+        self._prev = prev
+
+    def bind(self, k, v):
+        return Env(k, v, self)
+
+    @jit.unroll_safe
+    def lookup(self, sym):
+        sym = jit.promote(sym)
+        env = self
+        while env is not None:
+            if jit.promote(env._k) is sym:
+                return env._v
+            env = env._prev
+        return global_registry.get_global(sym)
+
+
 
 global_registry = Globals()
 
@@ -756,24 +876,34 @@ def reset_globals():
 
 reset_globals()
 
-def lookup(env, k):
-    e = env
-    while e is not nil:
-        if e.car().car() is k:
-            return e.car().cdr()
+def get_location(prev, expr):
+    return prev.to_string() + " | " + expr.to_string()
+    #return "Unknown"
 
-        e = e.cdr()
+jitdriver = jit.JitDriver(greens=['expr', 'prev_expr'], reds=["env", "stack", "val"],
+                          get_printable_location=get_location) #, virtualizables=["env"]
 
-    return global_registry.get_global(k)
+
 
 def eval_all(expr):
-    env = nil
-    stack = tos
+    env = jit.promote(Env(self_sym, nil))
+    stack = jit.promote(tos)
     val, stack = eval_one(env, expr, stack)
+    prev_expr = nil
+    expr = nil
 
     while stack.has_more():
+        jitdriver.jit_merge_point(expr=expr, prev_expr=prev_expr, env=env, stack=stack, val=val)
         k, stack = stack.pop()
+
+        prev_expr = expr
+        expr = k.expr()
+        can_enter = k.can_enter_jit()
         val, stack = k.call_continuation(val, stack)
+
+        if can_enter:
+            jitdriver.can_enter_jit(expr=expr, prev_expr=prev_expr, env=env, stack=stack, val=val)
+
 
     return val
 

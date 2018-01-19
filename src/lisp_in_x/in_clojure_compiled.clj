@@ -75,6 +75,7 @@
         f))
     form))
 
+
 (defn sexpr->clj [env sym form]
   (cond
     (direct-mapping? sym) `(~sym ~@(map (partial lisp->clj env) form))
@@ -169,7 +170,7 @@
   (reset-globals)
   (ns-publics eval-ns)
 
-  (lisp->clj #{} (read-file "src/lisp_in_x/lisp_in_lisp.clj")
+  (lisp->clj #{} (read-file "src/lisp_in_x/stdlib.clj")
 
              #_(do (def foo 42)
                    ))
@@ -184,6 +185,8 @@
 
   (eval-file "src/lisp_in_x/tests.clj")
   (eval-file "src/lisp_in_x/deeper.clj")
+
+  (slurp "src/lisp_in_x/tests.clj")
 
   (type ((eval `(fn [] ~(cons 1)))))
   (eval '1)
